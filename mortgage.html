@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mortgage Projection</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 20px; }
+  .params { display: flex; gap: 20px; flex-wrap: wrap; align-items: end; padding: 15px; background: #f0f4f8; border-radius: 8px; }
+  label { display: flex; flex-direction: column; font-size: 14px; gap: 4px; }
+  input, select { padding: 6px; font-size: 14px; }
+  input[readonly] { background: #e2e8f0; font-weight: 600; border: 1px solid #a0aec0; }
+  .taxinfo { flex-basis: 100%; border-top: 1px solid #c5d0dc; padding-top: 10px; font-size: 14px; }
+  .taxrates { display: flex; gap: 20px; margin: 8px 0; }
+  .taxinfo small { display: block; color: #444; max-width: 900px; }
+  .summary { margin: 12px 0; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 5px 10px; text-align: right; border-bottom: 1px solid #ddd; }
+  th:nth-child(-n+2), td:nth-child(-n+2) { text-align: left; }
+  thead th { position: sticky; top: 0; background: #2c5282; color: #fff; }
+  </style>
+</head>
+<body>
+<h2>Mortgage Projection</h2>
+<div class="params">
+  <label>House value
+    <input id="house" type="number" value="500000" min="0" step="10000">
+  </label>
+  <label>Own contribution
+    <input id="own" type="number" value="130000" min="0" step="10000">
+  </label>
+  <label>Costs (kosten koper)
+    <input id="costs" type="number" value="22000" min="0" step="1000">
+  </label>
+  <label>Mortgage amount
+    <input id="amount" type="text" readonly title="House value + costs - own contribution">
+  </label>
+  <label>Interest rate (% per year)
+    <input id="rate" type="number" value="4.5" min="0" step="0.1">
+  </label>
+  <label>Type
+    <select id="type">
+      <option value="annuity">Annuity</option>
+      <option value="linear">Linear</option>
+    </select>
+  </label>
+  <div class="taxinfo">
+    <strong>Tax deduction rate (hypotheekrenteaftrek) on interest</strong>
+    <div class="taxrates">
+      <label>Deduction rate (%) <input id="taxrate" type="number" value="37.56" min="0" step="0.01"></label>
+      <label>WOZ value <input id="woz" type="number" value="470000" min="0" step="10000"></label>
+      <label>WOZ appreciation (% per year) <input id="wozgrowth" type="number" value="3" step="0.1"></label>
+      <label>Eigenwoningforfait (% of WOZ) <input id="ewf" type="number" value="0.35" min="0" step="0.01"></label>
+    </div>
+    <small>
+      Deduction rate: 37.56% in 2026, 38.16% proposed for 2027 (~35.75% for incomes below ~&euro;38,900).<br>
+      Eigenwoningforfait: 0.35% of WOZ, subtracted from interest. If it exceeds the interest, the excess is partly taxed (Wet Hillen, fully taxed from 2048).<br>
+      WOZ grows yearly by the appreciation rate. Tax benefit is calculated per year and shown per month.
+    </small>
+  </div>
+</div>
+<div class="summary" id="summary"></div>
+<table>
+  <thead>
+    <tr>
+      <th></th>
+      <th>Date</th>
+      <th>Total</th>
+      <th>Gross installment</th>
+      <th>Principal</th>
+      <th>Interest</th>
+      <th>Forfait</th>
+      <th>Tax benefit</th>
+      <th>Net installment</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+const N = 360;
+const fmt = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const mmyy = d => String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getFullYear());
+
+function compute() {
+  const num = id => parseFloat(document.getElementById(id).value) || 0;
+  const amount = Math.max(0, num('house') + num('costs') - num('own'));
+  document.getElementById('amount').value = fmt.format(amount);
+  const rate = (parseFloat(document.getElementById('rate').value) || 0) / 100 / 12;
+  const type = document.getElementById('type').value;
+  const start = new Date(2027, 0, 1);
+  let balance = amount, totalInterest = 0, totalPaid = 0, totalTax = 0;
+  const r = id => (parseFloat(document.getElementById(id).value) || 0) / 100;
+  const taxRate = r('taxrate');
+  const wozGrowth = r('wozgrowth');
+  const annuity = rate === 0 ? amount / N : amount * rate / (1 - Math.pow(1 + rate, -N));
+  const linearPrincipal = amount / N;
+  let html = '';
+
+  for (let y = 0; y < N / 12; y++) {
+    const d = new Date(start.getFullYear() + y, start.getMonth(), 1);
+    const startBalance = balance;
+    let yearInterest = 0, first = null;
+    for (let m = 0; m < 12; m++) {
+      const i = y * 12 + m;
+      const interest = balance * rate;
+      let principal = type === 'annuity' ? annuity - interest : linearPrincipal;
+      if (i === N - 1) principal = balance;
+      const payment = principal + interest;
+      balance = Math.max(0, balance - principal);
+      yearInterest += interest;
+      totalInterest += interest;
+      totalPaid += payment;
+      if (m === 0) first = { payment, principal, interest };
+    }
+    // Annual netting: deductible = interest - forfait; if negative, Wet Hillen exempts part of the excess
+    const yearForfait = num('woz') * Math.pow(1 + wozGrowth, y) * r('ewf');
+    let deductible = yearInterest - yearForfait;
+    if (deductible < 0) {
+      const hillen = Math.max(0, (30 - (d.getFullYear() - 2018)) / 30);
+      deductible *= 1 - hillen;
+    }
+    const yearTax = deductible * taxRate;
+    totalTax += yearTax;
+    const tax = yearTax / 12;
+
+    // Installment columns show the first month of the year; forfait and tax benefit are yearly amounts / 12
+    html += `<tr><td>${y + 1}</td><td>${mmyy(d)}</td><td>${fmt.format(startBalance)}</td>` +
+      `<td>${fmt.format(first.payment)}</td><td>${fmt.format(first.principal)}</td><td>${fmt.format(first.interest)}</td><td>${fmt.format(yearForfait / 12)}</td>` +
+      `<td>${fmt.format(tax)}</td><td>${fmt.format(first.payment - tax)}</td></tr>`;
+  }
+  document.getElementById('rows').innerHTML = html;
+  document.getElementById('summary').textContent =
+    `Total interest: ${fmt.format(totalInterest)} | Total paid: ${fmt.format(totalPaid)} | Total tax benefit: ${fmt.format(totalTax)} | Total net: ${fmt.format(totalPaid - totalTax)}`;
+}
+
+['house', 'own', 'costs', 'rate', 'type', 'taxrate', 'woz', 'wozgrowth', 'ewf'].forEach(id => document.getElementById(id).addEventListener('input', compute));
+compute();
+</script>
+</body>
+</html>
